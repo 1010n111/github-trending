@@ -65,7 +65,11 @@ gh api repos/1010n111/1010n111.github.io/keys \
 | 随机无关密钥访问 blog | `Permission denied (publickey)`——认证即失败 |
 | blog 密钥读取公开 pages 仓库 | 成功 |
 
-即 deploy key 除自身绑定的仓库外，**还能读取任意公开仓库**。pages 仓库是公开的，所以 blog 那把密钥也能读它；但真正需要的写操作仍分别由各自绑定的密钥完成，不受影响。
+即 deploy key 除自身绑定的仓库外，**还能认证任意公开仓库**（pages 仓库是公开的，所以 blog 那把也能通过它的认证）。
+
+> ⚠️ **首次运行失败的教训**：这条性质曾直接导致部署失败。SSH 按顺序逐一试探 agent 里的密钥，服务端接受第一个「认证成功」的就不再试后续的。若两把密钥装在同一个 ssh-agent 中，blog 那把会先被接受（对公开 pages 只能读），push 随即被授权层拒绝：`Permission to 1010n111/1010n111.github.io.git denied to deploy key`——有写权限的 pages 密钥根本轮不到被试。
+>
+> 因此 workflow **不使用 ssh-agent**，改用两个 SSH 主机别名（`github.com-blog` / `github.com-pages`）配合 `IdentitiesOnly yes`，保证每个连接只提供且只允许使用对应的那一把密钥。
 
 ### 3. 配置 Secrets
 
@@ -110,7 +114,7 @@ workflow 里设了 `TZ: Asia/Shanghai`，三个脚本用的 `datetime.now()` 因
 
 ### Hexo deploy 的跨仓库推送
 
-`_config.yml` 的 `repo` 仍指向 pages 仓库的 **HTTPS 地址**，一行未改。workflow 用 git 的 `url.*.insteadOf` 把该 URL 精确映射成 SSH 地址，改由 `PAGES_DEPLOY_KEY` 认证，从而不必改动博客配置。
+`_config.yml` 的 `repo` 仍指向 pages 仓库的 **HTTPS 地址**，一行未改。workflow 用 git 的 `url.*.insteadOf` 把该 URL 精确映射成 SSH 别名 `git@github.com-pages:...`（该别名只配置 `PAGES_DEPLOY_KEY`，见「创建部署密钥」一节的教训），从而不必改动博客配置。
 
 ### Step 5 与 Step 6 的区别
 

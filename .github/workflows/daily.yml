@@ -45,15 +45,23 @@ jobs:
       # 博客与 pages 仓库都不属于本仓库，内置 GITHUB_TOKEN 无权访问，
       # 因此各用一把独立的 deploy key（写权限各自独立，绑定在各自仓库上）。
       #
-      # 实测补充说明其隔离边界：
+      # 关键教训：**两把密钥绝不能同时装进同一个 ssh-agent**（首次运行即因此失败）。
+      # SSH 按 agent 中的顺序逐个试探密钥，服务端接受第一个「认证成功」的之后
+      # 就不再试后续的。而 deploy key 除绑定仓库外还能认证任意公开仓库——
+      # blog 密钥对公开的 pages 仓库能通过认证（只读），于是认证在 blog 这把
+      # 就结束了，push 被授权层拒绝：
+      #   ERROR: Permission to 1010n111/1010n111.github.io.git denied to deploy key
+      # 真正的 pages 密钥（有写权限）根本没被试到。
+      #
+      # 实测过的隔离边界：
       #   - pages 密钥访问私有 blog 仓库 -> "Repository not found"（已认证但被授权层拒绝）
       #   - 随机无关密钥访问 blog      -> "Permission denied (publickey)"（认证即失败）
-      #   - blog 密钥读取公开 pages 仓库 -> 成功
-      # 即 deploy key 除自己绑定的仓库外，还能读取任意公开仓库。
-      # pages 仓库是公开的，故 blog 那把也能读它，但这不影响正确性：
-      # 实际需要的写操作仍分别由各自绑定的 key 完成。
+      #   - blog 密钥读取公开 pages 仓库 -> 成功（这正是上面踩坑的根源）
       #
-      # 这里自建 ssh-agent 并装载两把私钥，导出 SSH_AUTH_SOCK 供后续步骤复用。
+      # 因此改用「按目标主机区分的别名」：github.com-blog 只配 blog 密钥、
+      # github.com-pages 只配 pages 密钥，配合 IdentitiesOnly yes，
+      # 每个连接有且只有对应的一把密钥可被提供。密钥直接从文件读取，
+      # 不再依赖 ssh-agent（~/.ssh/config 跨步骤持久，无需导出环境变量）。
       - name: Setup SSH deploy keys
         env:
           BLOG_DEPLOY_KEY: ${{ secrets.BLOG_DEPLOY_KEY }}
@@ -63,19 +71,28 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           ssh-keyscan github.com >> ~/.ssh/known_hosts
-          eval "$(ssh-agent -s)"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           printf '%s\n' "$BLOG_DEPLOY_KEY"  > ~/.ssh/blog_key
           printf '%s\n' "$PAGES_DEPLOY_KEY" > ~/.ssh/pages_key
           chmod 600 ~/.ssh/blog_key ~/.ssh/pages_key
-          ssh-add ~/.ssh/blog_key ~/.ssh/pages_key
-          ssh-add -l
+          # 用 printf 而非 heredoc，避免 YAML 缩进混入配置文件
+          printf '%s\n' \
+            'Host github.com-blog' \
+            '  HostName github.com' \
+            '  User git' \
+            '  IdentityFile ~/.ssh/blog_key' \
+            '  IdentitiesOnly yes' \
+            '' \
+            'Host github.com-pages' \
+            '  HostName github.com' \
+            '  User git' \
+            '  IdentityFile ~/.ssh/pages_key' \
+            '  IdentitiesOnly yes' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
-      # 用 SSH 直接 clone，依赖上一步的 agent。
+      # 用别名 github.com-blog clone（只提供 blog 密钥，见上一步）。
       # 浅克隆即可：Step 6 只需在当前 HEAD 上追加一个提交，无需完整历史。
       - name: Clone blog repo
-        run: git clone --depth 1 --branch master git@github.com:1010n111/blog.git blog
+        run: git clone --depth 1 --branch master git@github.com-blog:1010n111/blog.git blog
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -193,9 +210,10 @@ jobs:
           npx hexo clean
           npx hexo generate
           # hexo deploy 要推到 pages 仓库。_config.yml 里写的是 HTTPS 地址，
-          # 这里用 insteadOf 精确映射到 SSH，靠 pages 部署密钥认证，
+          # 这里用 insteadOf 精确映射到 SSH 别名 github.com-pages，
+          # 只提供 pages 那一把部署密钥（别名定义见 Setup SSH deploy keys 步），
           # 博客配置文件一行都不用改。
-          git config --global url."git@github.com:1010n111/1010n111.github.io.git".insteadOf \
+          git config --global url."git@github.com-pages:1010n111/1010n111.github.io.git".insteadOf \
             "https://github.com/1010n111/1010n111.github.io.git"
           npx hexo deploy
 
