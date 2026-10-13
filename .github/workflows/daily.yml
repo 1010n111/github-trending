@@ -30,7 +30,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # 实测各阶段耗时：checkout ~40s、pip ~10s、npm i -g opencode ~30s、
+    # 实测各阶段耗时：clone ~40s、pip ~10s、npm i -g opencode ~30s、
     # 抓取 ~5s、opencode 生成 ~260s、npm ci ~180s、hexo build ~120s、deploy ~60s，
     # 合计约 15 分钟。留出一倍余量应对 npm ci 与 LLM 的波动。
     timeout-minutes: 45
@@ -42,15 +42,40 @@ jobs:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
 
-      # 博客是私有仓库，必须用 PAT 才能 checkout 与回推源码。
-      # 该 PAT 需同时具备 1010n111/blog 与 1010n111.github.io 的 Contents 读写权限。
-      - name: Checkout blog repo
-        uses: actions/checkout@v4
-        with:
-          repository: 1010n111/blog
-          ref: master
-          path: blog
-          token: ${{ secrets.GH_PAT }}
+      # 博客与 pages 仓库都不属于本仓库，内置 GITHUB_TOKEN 无权访问，
+      # 因此各用一把独立的 deploy key（写权限各自独立，绑定在各自仓库上）。
+      #
+      # 实测补充说明其隔离边界：
+      #   - pages 密钥访问私有 blog 仓库 -> "Repository not found"（已认证但被授权层拒绝）
+      #   - 随机无关密钥访问 blog      -> "Permission denied (publickey)"（认证即失败）
+      #   - blog 密钥读取公开 pages 仓库 -> 成功
+      # 即 deploy key 除自己绑定的仓库外，还能读取任意公开仓库。
+      # pages 仓库是公开的，故 blog 那把也能读它，但这不影响正确性：
+      # 实际需要的写操作仍分别由各自绑定的 key 完成。
+      #
+      # 这里自建 ssh-agent 并装载两把私钥，导出 SSH_AUTH_SOCK 供后续步骤复用。
+      - name: Setup SSH deploy keys
+        env:
+          BLOG_DEPLOY_KEY: ${{ secrets.BLOG_DEPLOY_KEY }}
+          PAGES_DEPLOY_KEY: ${{ secrets.PAGES_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          printf '%s\n' "$BLOG_DEPLOY_KEY"  > ~/.ssh/blog_key
+          printf '%s\n' "$PAGES_DEPLOY_KEY" > ~/.ssh/pages_key
+          chmod 600 ~/.ssh/blog_key ~/.ssh/pages_key
+          ssh-add ~/.ssh/blog_key ~/.ssh/pages_key
+          ssh-add -l
+
+      # 用 SSH 直接 clone，依赖上一步的 agent。
+      # 浅克隆即可：Step 6 只需在当前 HEAD 上追加一个提交，无需完整历史。
+      - name: Clone blog repo
+        run: git clone --depth 1 --branch master git@github.com:1010n111/blog.git blog
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -162,16 +187,15 @@ jobs:
       # ---------------------------------------------------------------
       - name: 'Step 5/6: Build and deploy Hexo'
         working-directory: blog
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
+          set -euo pipefail
           npm ci --no-audit --no-fund
           npx hexo clean
           npx hexo generate
-          # hexo deploy 要推到另一个仓库（pages 仓库），
-          # checkout 配置的凭据只覆盖当前仓库，这里对目标 URL 精确注入 token，
-          # 这样 _config.yml 一行都不用改。
-          git config --global url."https://x-access-token:${GH_PAT}@github.com/1010n111/1010n111.github.io.git".insteadOf \
+          # hexo deploy 要推到 pages 仓库。_config.yml 里写的是 HTTPS 地址，
+          # 这里用 insteadOf 精确映射到 SSH，靠 pages 部署密钥认证，
+          # 博客配置文件一行都不用改。
+          git config --global url."git@github.com:1010n111/1010n111.github.io.git".insteadOf \
             "https://github.com/1010n111/1010n111.github.io.git"
           npx hexo deploy
 
@@ -183,6 +207,7 @@ jobs:
       - name: 'Step 6/6: Commit and push blog source'
         working-directory: blog
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add source/_posts
@@ -191,7 +216,7 @@ jobs:
             echo "没有新的文章源文件需要提交"
           else
             git commit -m "post: $(date '+%Y-%m-%d') Github热门仓库"
-            git push
+            git push origin master
           fi
 
       # ---------------------------------------------------------------

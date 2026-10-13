@@ -15,7 +15,7 @@
 | opencode | 本机 nvm 安装 | 每次 `npm install -g opencode-ai` |
 | 代理 | 必须，`run_daily.sh` 探测 7897 端口 | **不需要**，runner 出站不经国内 |
 | Hexo | 本机 `node node_modules/hexo/bin/hexo`（迁移丢了可执行位） | `npm ci` 全新安装，`npx hexo` 直接可用 |
-| git 凭据 | `gh auth setup-git` | 仓库 Secrets 里的 PAT |
+| git 凭据 | `gh auth setup-git` | 仓库 Secrets 里的部署密钥 |
 | 源码备份 | Step 6 `git push` | Step 6 同语义 |
 
 ## 流程
@@ -38,20 +38,34 @@ Step 6  git add/commit/push source/_posts -> 备份文章源码
 
 在 GitHub 新建公开仓库后推送即可；实际操作时也可直接用 `gh repo create --public` 一步完成。
 
-### 2. 创建 Fine-grained PAT
+### 2. 创建部署密钥
 
-GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token。
+流水线仓库的内置 `GITHUB_TOKEN` 无法访问另外两个仓库，因此各用一把 **deploy key**（写权限）：
 
-| 项 | 值 |
+```bash
+ssh-keygen -t ed25519 -N '' -C gha-deploy-blog  -f ~/.ssh/github-trending-blog
+ssh-keygen -t ed25519 -N '' -C gha-deploy-pages -f ~/.ssh/github-trending-pages
+
+gh api repos/1010n111/blog/keys \
+  -f title=github-actions-deploy-blog \
+  -f key="$(cat ~/.ssh/github-trending-blog.pub)" -F read_only=false
+
+gh api repos/1010n111/1010n111.github.io/keys \
+  -f title=github-actions-deploy-pages \
+  -f key="$(cat ~/.ssh/github-trending-pages.pub)" -F read_only=false
+```
+
+选 deploy key 而非 PAT 的原因：它由 API 直接创建，不必手动去网页生成；且写权限绑定在各自仓库上，不涉及其他仓库。
+
+**实测过的隔离边界**（写文档前逐条验证过，不是照抄官方说法）：
+
+| 场景 | 结果 |
 |---|---|
-| Repository access | **Only select repositories**，勾选 `1010n111/blog` 和 `1010n111.github.io` |
-| Permissions → Repository permissions → **Contents** | **Read and write** |
-| 其他权限 | 全部保持 No access |
-| Expiration | 自行决定，到期需手动续期 |
+| pages 密钥访问私有 blog 仓库 | `Repository not found`——已认证，被授权层拒绝 |
+| 随机无关密钥访问 blog | `Permission denied (publickey)`——认证即失败 |
+| blog 密钥读取公开 pages 仓库 | 成功 |
 
-一个 token 同时覆盖两个仓库：Step 5 推 pages 仓库、Step 6 回推 blog 源码都靠它。
-
-> 注意：Fine-grained PAT 是按仓库授权的。新建的流水线仓库本身不需要它（用内置 `GITHUB_TOKEN` 即可）。
+即 deploy key 除自身绑定的仓库外，**还能读取任意公开仓库**。pages 仓库是公开的，所以 blog 那把密钥也能读它；但真正需要的写操作仍分别由各自绑定的密钥完成，不受影响。
 
 ### 3. 配置 Secrets
 
@@ -59,12 +73,20 @@ GitHub → Settings → Developer settings → Personal access tokens → **Fine
 
 | Secret | 说明 | 示例 |
 |---|---|---|
-| `GH_PAT` | 上一步创建的 fine-grained PAT | `github_pat_...` |
+| `BLOG_DEPLOY_KEY` | blog 仓库部署私钥（`~/.ssh/github-trending-blog` 的内容） | `-----BEGIN OPENSSH PRIVATE KEY-----` |
+| `PAGES_DEPLOY_KEY` | pages 仓库部署私钥（`~/.ssh/github-trending-pages` 的内容） | 同上 |
 | `SMTP_SERVER` | SMTP 服务器 | `smtp.qq.com` |
 | `SMTP_PORT` | SMTP 端口 | `587` |
 | `SMTP_USER` | 发信账号 | `xxx@qq.com` |
 | `SMTP_PASS` | **授权码**，不是登录密码 | `xxxxxxxx` |
 | `EMAIL_TO` | 收件人，逗号分隔 | `xxx@qq.com` |
+
+私钥可用命令写入，避免粘贴出错：
+
+```bash
+cat ~/.ssh/github-trending-blog  | gh secret set BLOG_DEPLOY_KEY  --repo 1010n111/github-trending
+cat ~/.ssh/github-trending-pages | gh secret set PAGES_DEPLOY_KEY --repo 1010n111/github-trending
+```
 
 `OPENCODE_MODEL` 已写死在 workflow 的 `env` 里，无需配置。
 
@@ -88,7 +110,7 @@ workflow 里设了 `TZ: Asia/Shanghai`，三个脚本用的 `datetime.now()` 因
 
 ### Hexo deploy 的跨仓库推送
 
-`_config.yml` 的 `repo` 仍指向 pages 仓库，一行未改。workflow 用 git 的 `url.*.insteadOf` 对该 URL 精确注入 token，避免改动博客配置。
+`_config.yml` 的 `repo` 仍指向 pages 仓库的 **HTTPS 地址**，一行未改。workflow 用 git 的 `url.*.insteadOf` 把该 URL 精确映射成 SSH 地址，改由 `PAGES_DEPLOY_KEY` 认证，从而不必改动博客配置。
 
 ### Step 5 与 Step 6 的区别
 
