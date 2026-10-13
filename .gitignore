@@ -1,0 +1,18 @@
+# 本地密钥，绝不入库
+.env
+
+# 每日生成的中间产物，跑完即弃
+trending.json
+article.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器/系统
+.DS_Store
+.idea/
+.vscode/

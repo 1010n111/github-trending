@@ -1,0 +1,202 @@
+name: Daily GitHub Trending
+
+# 每天北京时间 08:00 触发。GitHub 的 cron 只认 UTC，北京时间 = UTC+8，
+# 因此 UTC 00:00 对应北京 08:00。中国无夏令时，全年稳定。
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  # 手动触发入口，用于补跑或验证。可临时传入 skip_email=true 只跑发文链路。
+  workflow_dispatch:
+    inputs:
+      skip_email:
+        description: '跳过发信步骤（验证用）'
+        type: boolean
+        default: false
+
+# 三个 Python 脚本与 opencode 都按本地时区语义工作，
+# 本地机器是 CST，这里显式对齐，保证 date_str 与原流程一致。
+env:
+  TZ: Asia/Shanghai
+  OPENCODE_MODEL: opencode/mimo-v2.6-flash-free
+
+# 同一时间只允许一个运行，避免两次跑互相覆盖当天文章
+concurrency:
+  group: daily-github-trending
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # 实测各阶段耗时：checkout ~40s、pip ~10s、npm i -g opencode ~30s、
+    # 抓取 ~5s、opencode 生成 ~260s、npm ci ~180s、hexo build ~120s、deploy ~60s，
+    # 合计约 15 分钟。留出一倍余量应对 npm ci 与 LLM 的波动。
+    timeout-minutes: 45
+
+    steps:
+      # ---------------------------------------------------------------
+      # 准备环境
+      # ---------------------------------------------------------------
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+
+      # 博客是私有仓库，必须用 PAT 才能 checkout 与回推源码。
+      # 该 PAT 需同时具备 1010n111/blog 与 1010n111.github.io 的 Contents 读写权限。
+      - name: Checkout blog repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1010n111/blog
+          ref: master
+          path: blog
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # opencode 的免费模型无需登录即可调用，因此这里不需要额外凭据
+      - name: Install opencode
+        run: npm install -g opencode-ai
+
+      # ---------------------------------------------------------------
+      # Step 1: 抓取 GitHub Trending -> trending.json
+      # ---------------------------------------------------------------
+      - name: 'Step 1/6: Fetch GitHub Trending'
+        run: python fetch_trending.py
+
+      # 护栏：确认抓取产物真实存在。
+      # opencode 拥有完整工具权限，若 trending.json 缺失，它会自行 WebFetch 或
+      # 读取机器上其他位置的陈旧文件，导致文章数据与本步骤产物脱节，
+      # 因此这里显式卡住，而不是依赖步骤顺序。
+      - name: Validate fetched trending
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          if not os.path.exists('trending.json'):
+              print('::error::trending.json 不存在，Step 1 未产出')
+              sys.exit(1)
+          repos = json.load(open('trending.json'))
+          if len(repos) < 3:
+              print(f'::error::trending.json 仅 {len(repos)} 个仓库，疑似抓取不完整')
+              sys.exit(1)
+          print(f'trending.json 校验通过：{len(repos)} 个仓库')
+          PY
+
+      # ---------------------------------------------------------------
+      # Step 2: opencode 生成文章 -> article.json
+      # 工作目录即仓库根目录，prompt 里写的是「当前目录下的 trending.json」
+      # ---------------------------------------------------------------
+      - name: 'Step 2/6: Generate article via opencode'
+        run: |
+          opencode run --format default \
+            --model "$OPENCODE_MODEL" \
+            --auto "$(cat opencode-prompt.md)"
+
+      # opencode 退出码为 0 不代表 article.json 一定写成功了，
+      # 这里显式校验，避免带着空产物往下走。
+      # 同时交叉校验数据来源：文章引用的仓库必须能在 trending.json 中找到，
+      # 否则说明 opencode 绕过了本步骤产物、自行抓取了别的数据。
+      - name: Validate generated article
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          if not os.path.exists('article.json'):
+              print('::error::opencode 未产出 article.json')
+              sys.exit(1)
+          article = json.load(open('article.json'))
+          for key in ('title', 'featured'):
+              if not article.get(key):
+                  print(f'::error::article.json 缺少 {key}')
+                  sys.exit(1)
+          known = {r['name'] for r in json.load(open('trending.json'))}
+          used = [i.get('name', '') for i in article['featured'] + (article.get('quick_picks') or [])]
+          unknown = [n for n in used if n not in known]
+          if unknown:
+              print(f'::error::以下仓库不在 trending.json 中，数据来源存疑: {unknown}')
+              sys.exit(1)
+          print(f"article.json 校验通过: {article['title']}")
+          print(f"引用 {len(used)} 个仓库，全部来自 trending.json")
+          PY
+
+      # ---------------------------------------------------------------
+      # Step 3: 渲染并发送邮件
+      # ---------------------------------------------------------------
+      - name: 'Step 3/6: Send email'
+        if: ${{ !inputs.skip_email }}
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python render_and_send.py
+
+      - name: 'Step 3/6: Skipped (manual run)'
+        if: ${{ inputs.skip_email }}
+        run: echo "按需跳过发信步骤"
+
+      # ---------------------------------------------------------------
+      # Step 4: 写入 Hexo 文章源文件
+      # ---------------------------------------------------------------
+      - name: 'Step 4/6: Write Hexo post'
+        env:
+          HEXO_BLOG_DIR: ${{ github.workspace }}/blog
+        run: python publish_to_hexo.py
+
+      # ---------------------------------------------------------------
+      # Step 5: hexo generate + deploy
+      # node_modules 不在 git 里，npm ci 全新安装，可执行位正常，
+      # 因此这里可以直接用 npx hexo（本地那台机器因迁移丢过可执行位才需要绕行）。
+      # ---------------------------------------------------------------
+      - name: 'Step 5/6: Build and deploy Hexo'
+        working-directory: blog
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          npm ci --no-audit --no-fund
+          npx hexo clean
+          npx hexo generate
+          # hexo deploy 要推到另一个仓库（pages 仓库），
+          # checkout 配置的凭据只覆盖当前仓库，这里对目标 URL 精确注入 token，
+          # 这样 _config.yml 一行都不用改。
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/1010n111/1010n111.github.io.git".insteadOf \
+            "https://github.com/1010n111/1010n111.github.io.git"
+          npx hexo deploy
+
+      # ---------------------------------------------------------------
+      # Step 6: 提交并推送博客源码
+      # hexo deploy 只推渲染后的 HTML，源 .md 需要单独备份，
+      # 否则文章原文只存在于 runner 的临时工作区里，跑完即丢。
+      # ---------------------------------------------------------------
+      - name: 'Step 6/6: Commit and push blog source'
+        working-directory: blog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source/_posts
+          # git diff --cached --quiet 在无暂存改动时返回 1，会被 set -e 中断
+          if git diff --cached --quiet; then
+            echo "没有新的文章源文件需要提交"
+          else
+            git commit -m "post: $(date '+%Y-%m-%d') Github热门仓库"
+            git push
+          fi
+
+      # ---------------------------------------------------------------
+      # 收尾：清理产物，避免误用旧数据（与本机 run_daily.sh 语义一致）
+      # ---------------------------------------------------------------
+      - name: Cleanup artifacts
+        if: always()
+        run: rm -f article.json trending.json
