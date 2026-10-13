@@ -34,18 +34,9 @@ Step 6  git add/commit/push source/_posts -> 备份文章源码
 
 ### 1. 建仓库并推送
 
-本目录即为一个完整仓库。在 GitHub 新建仓库后：
+本目录即为一个完整仓库。**设为公开**：代码里没有任何密钥（密钥全部走仓库 Secrets），公开可换来两个好处——免费 Actions 额度无限，且不会因长期无 commit 活动而被自动禁用定时工作流。
 
-```bash
-cd /home/ww/myCode/GitHubTrending-Actions
-git init -b main
-git add -A
-git commit -m "feat: 迁移到 GitHub Actions"
-git remote add origin git@github.com:1010n111/github-trending.git
-git push -u origin main
-```
-
-> 建议设为 **私有**。虽然代码里没有任何密钥，但公开仓库会让流程细节外露。
+在 GitHub 新建公开仓库后推送即可；实际操作时也可直接用 `gh repo create --public` 一步完成。
 
 ### 2. 创建 Fine-grained PAT
 
@@ -85,12 +76,11 @@ Actions → Daily GitHub Trending → **Run workflow**。
 
 ## 已知注意事项
 
-### 定时可能延迟或不触发
+### 定时可能延迟
 
-- GitHub 的 cron **不保证准点**，公共仓库高峰期可能延迟十几分钟甚至更久。
-- **私有仓库的定时工作流在连续 60 天无仓库活动后会被自动禁用**。本仓库每天只有 workflow 运行、不产生 commit，属于风险场景。应对方式二选一：
-  - 把本仓库设为公开仓库（免费额度无限，且代码无密钥）；
-  - 或定期手动 Run workflow 保持活跃，被禁用时 GitHub 会发邮件提醒。
+- GitHub 的 cron **不保证准点**，高峰期可能延迟十几分钟甚至更久。
+- 本仓库为公开仓库，因此不受「私有仓库 60 天无活动自动禁用定时工作流」的限制，无需刻意维持 commit 活动。
+- 若日后改为私有，需注意该限制：连续 60 天无仓库活动后定时工作流会被自动禁用，GitHub 会发邮件提醒，届时手动 Run workflow 即可恢复。
 
 ### 时间语义
 
