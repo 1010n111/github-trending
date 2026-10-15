@@ -10,7 +10,7 @@
 
 | | 本机版 | Actions 版 |
 |---|---|---|
-| 定时 | cron `0 8 * * *` | `cron: '0 0 * * *'`（UTC，等于北京 08:00） |
+| 定时 | cron `0 8 * * *` | `cron: '10 7 * * *'` + `timezone: Asia/Shanghai`（北京 07:10，避开整点，见「定时可能延迟」） |
 | Python 解释器 | `.venv` | `actions/setup-python` |
 | opencode | 本机 nvm 安装 | 每次 `npm install -g opencode-ai` |
 | 代理 | 必须，`run_daily.sh` 探测 7897 端口 | **不需要**，runner 出站不经国内 |
@@ -105,12 +105,18 @@ Actions → Daily GitHub Trending → **Run workflow**。
 ### 定时可能延迟
 
 - GitHub 的 cron **不保证准点**，高峰期可能延迟十几分钟甚至更久。
+- 官方文档点名**每小时的整点**是 Actions 高负载时段，延迟最严重，负载过高时排队任务甚至会被直接丢弃。
+- 因此没有把 schedule 设在 08:00（= UTC 00:00），而是设在北京 **07:10**（= UTC 23:10，非整点）。
+  实测佐证：workflow 上线后唯一一次 schedule 触发在 `2026-10-14 02:39 UTC`（北京 10:39，迟 2 小时 39 分），
+  第二天那次到北京 09:29 仍未运行——正是卡在 UTC 00:00 整点的结果。
 - 本仓库为公开仓库，因此不受「私有仓库 60 天无活动自动禁用定时工作流」的限制，无需刻意维持 commit 活动。
 - 若日后改为私有，需注意该限制：连续 60 天无仓库活动后定时工作流会被自动禁用，GitHub 会发邮件提醒，届时手动 Run workflow 即可恢复。
 
 ### 时间语义
 
-workflow 里设了 `TZ: Asia/Shanghai`，三个脚本用的 `datetime.now()` 因此与本机行为一致。UTC 00:00 触发时，UTC 日期与北京日期相同，不会出现跨日错位。
+workflow 里设了 `TZ: Asia/Shanghai`，三个脚本用的 `datetime.now()` 因此与本机行为一致。
+
+schedule 用 `timezone: Asia/Shanghai` + `cron: '10 7 * * *'` 在北京 07:10 触发（= UTC 23:10）。注意此刻 **UTC 日期比北京日期早一天**，所以文章日期一律以 `TZ` 换算出的北京时间为准，与本机 08:00 跑时的日期语义一致，不会出现跨日错位。
 
 ### Hexo deploy 的跨仓库推送
 
