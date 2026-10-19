@@ -23,11 +23,11 @@ on:
         type: boolean
         default: false
 
-# 三个 Python 脚本与 opencode 都按本地时区语义工作，
+# 三个 Python 脚本按本地时区语义工作，
 # 本地机器是 CST，这里显式对齐，保证 date_str 与原流程一致。
+# LLM_* 不在这里声明：它们是密钥，按最小权限只注入第 2 步（见 Step 2）。
 env:
   TZ: Asia/Shanghai
-  OPENCODE_MODEL: opencode/mimo-v2.6-flash-free
 
 # 同一时间只允许一个运行，避免两次跑互相覆盖当天文章
 concurrency:
@@ -40,9 +40,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # 实测各阶段耗时：clone ~40s、pip ~10s、npm i -g opencode ~30s、
-    # 抓取 ~5s、opencode 生成 ~260s、npm ci ~180s、hexo build ~120s、deploy ~60s，
-    # 合计约 15 分钟。留出一倍余量应对 npm ci 与 LLM 的波动。
+    # 实测各阶段耗时（opencode 版）：clone ~40s、pip ~10s、抓取 ~5s、
+    # opencode 生成 ~260s、npm ci ~180s、hexo build ~120s、deploy ~60s。
+    # 改用直连 LLM API 后省掉了 npm i -g opencode（~30s），
+    # 但生成耗时改由厂商决定：免费档高峰期可能数十秒到数分钟（含重试与 failover），
+    # 因此仍留足余量。
     timeout-minutes: 45
 
     steps:
@@ -113,14 +115,12 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # Node 现在只服务于 Step 5 的 Hexo 构建：
+      # Step 2 改为直连 LLM API，不再需要 Node / opencode。
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-
-      # opencode 的免费模型无需登录即可调用，因此这里不需要额外凭据
-      - name: Install opencode
-        run: npm install -g opencode-ai
 
       # ---------------------------------------------------------------
       # Step 1: 抓取 GitHub Trending -> trending.json
@@ -128,10 +128,8 @@ jobs:
       - name: 'Step 1/6: Fetch GitHub Trending'
         run: python fetch_trending.py
 
-      # 护栏：确认抓取产物真实存在。
-      # opencode 拥有完整工具权限，若 trending.json 缺失，它会自行 WebFetch 或
-      # 读取机器上其他位置的陈旧文件，导致文章数据与本步骤产物脱节，
-      # 因此这里显式卡住，而不是依赖步骤顺序。
+      # 护栏：确认抓取产物真实存在，避免在第 2 步白白消耗一次 LLM 调用
+      # （generate_article.py 内部也会校验仓库数量，这里是更早的一道）。
       - name: Validate fetched trending
         run: |
           python - <<'PY'
@@ -147,40 +145,31 @@ jobs:
           PY
 
       # ---------------------------------------------------------------
-      # Step 2: opencode 生成文章 -> article.json
-      # 工作目录即仓库根目录，prompt 里写的是「当前目录下的 trending.json」
+      # Step 2: 调用 LLM 生成文章 -> article.json
+      # 厂商无关：由 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 三个 Secret 决定用哪家，
+      # 换厂商只需改 Secret，workflow 与代码都不用动。
+      # 可再配 LLM_FALLBACK_* 指定第二家做 failover：
+      # 免费档额度小且会限流，单点很容易在某个早上直接失败。
+      #
+      # 三重容错（详见 generate_article.py 顶部注释）：
+      #   主 provider -> 备用 provider -> 模板生成（不调 LLM）
+      # 落到模板时会打 ::warning:: 并仍然以退出码 0 继续，
+      # 保证"永远有文章"；若希望失败即中断，给脚本加 --no-fallback。
+      #
+      # 原先紧跟其后的 Validate generated article 步骤已删除：
+      # 字段校验与"仓库必须来自 trending.json"的交叉校验已内建在脚本里，
+      # 校验不过则不会写出 article.json 且退出码非 0，由 Actions 自然拦住。
       # ---------------------------------------------------------------
-      - name: 'Step 2/6: Generate article via opencode'
-        run: |
-          opencode run --format default \
-            --model "$OPENCODE_MODEL" \
-            --auto "$(cat opencode-prompt.md)"
-
-      # opencode 退出码为 0 不代表 article.json 一定写成功了，
-      # 这里显式校验，避免带着空产物往下走。
-      # 同时交叉校验数据来源：文章引用的仓库必须能在 trending.json 中找到，
-      # 否则说明 opencode 绕过了本步骤产物、自行抓取了别的数据。
-      - name: Validate generated article
-        run: |
-          python - <<'PY'
-          import json, os, sys
-          if not os.path.exists('article.json'):
-              print('::error::opencode 未产出 article.json')
-              sys.exit(1)
-          article = json.load(open('article.json'))
-          for key in ('title', 'featured'):
-              if not article.get(key):
-                  print(f'::error::article.json 缺少 {key}')
-                  sys.exit(1)
-          known = {r['name'] for r in json.load(open('trending.json'))}
-          used = [i.get('name', '') for i in article['featured'] + (article.get('quick_picks') or [])]
-          unknown = [n for n in used if n not in known]
-          if unknown:
-              print(f'::error::以下仓库不在 trending.json 中，数据来源存疑: {unknown}')
-              sys.exit(1)
-          print(f"article.json 校验通过: {article['title']}")
-          print(f"引用 {len(used)} 个仓库，全部来自 trending.json")
-          PY
+      - name: 'Step 2/6: Generate article via LLM'
+        env:
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          # 可选的备用 provider，未配置时留空即可（脚本会自动跳过）
+          LLM_FALLBACK_BASE_URL: ${{ secrets.LLM_FALLBACK_BASE_URL }}
+          LLM_FALLBACK_API_KEY: ${{ secrets.LLM_FALLBACK_API_KEY }}
+          LLM_FALLBACK_MODEL: ${{ secrets.LLM_FALLBACK_MODEL }}
+        run: python generate_article.py
 
       # ---------------------------------------------------------------
       # Step 3: 渲染并发送邮件

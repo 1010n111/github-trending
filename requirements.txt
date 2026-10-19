@@ -1,4 +1,4 @@
-# 只需要 requests。
-# 三个脚本各自内建了轻量 load_dotenv()，不依赖 python-dotenv；
+# 只需要 requests：fetch_trending.py 与 generate_article.py 用它发 HTTP 请求。
+# 四个脚本各自内建了轻量 load_dotenv()，不依赖 python-dotenv；
 # render_and_send.py / publish_to_hexo.py 仅使用标准库。
 requests==2.31.0
