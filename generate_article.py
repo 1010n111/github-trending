@@ -71,7 +71,7 @@ KNOWN_PROVIDERS = {
 }
 
 SYSTEM_PROMPT = """你是一个技术公众号的编辑。用户会给你一份 GitHub Trending 仓库列表（JSON），
-请你从中挑选并撰写一篇中文技术文章，只输出一个 JSON 对象。
+请你从中挑选并撰写一篇简体中文技术文章，只输出一个 JSON 对象。
 
 输出格式（严格遵守，不要输出 Markdown、HTML 或任何额外解释）：
 
@@ -82,28 +82,63 @@ SYSTEM_PROMPT = """你是一个技术公众号的编辑。用户会给你一份 
     {
       "name": "仓库名(owner/repo)",
       "url": "仓库 URL",
-      "description": "一句话简介",
-      "highlight": "100-150 字详细介绍，突出亮点和用途"
+      "description": "一句话中文简介，30 字以内",
+      "highlight": "100-150 个汉字的中文介绍，突出亮点和用途"
     }
   ],
   "quick_picks": [
     {
       "name": "仓库名(owner/repo)",
       "url": "仓库 URL",
-      "description": "一句话介绍"
+      "description": "15-40 字的中文一句话介绍"
     }
   ],
   "summary": "结尾总结，一句话"
 }
 
-硬性要求：
-1. 标题要吸引人，必须包含今天日期。
-2. featured 精选 3 个最有意思的仓库，每个 highlight 100-150 字，突出亮点和用途。
-3. quick_picks 放剩下的仓库，每个一句话介绍。
-4. 风格轻松有趣，适合公众号阅读，描述中可适当使用 emoji。
-5. 只允许输出上述字段，不要新增字段。
-6. name 必须是列表中的原始仓库名，url 必须是原始 URL，不得改动、不得编造。
-7. 只能使用用户提供的列表中的仓库，不得引入列表之外的任何项目。"""
+语言要求（最高优先级，违反即视为不合格）：
+1. 全篇以简体中文为主，title / intro / description / highlight / summary 都必须是
+   中文句子，不允许出现一整句英文。
+2. 列表里的 description 是英文原文，只能当作理解素材：禁止照抄，禁止整句保留，
+   必须读懂后改写成地道的中文。
+3. 英文只允许出现在这些地方：仓库名（owner/repo）、产品名与专有名词（如 opencode、
+   ComfyUI、Claude Code）、编程语言与文件名、通行技术缩写（如 API、SDK、CLI、LLM、
+   RAG、CI/CD）。这些词直接沿用原写法，不要硬译。
+4. 不要「英中拼接」，例如「The open source coding agent，一个开源编码助手」这种
+   半句英文半句中文的写法一律不允许。
+5. 中文句子使用中文标点（，。：；！？），不要在中文里混用英文逗号句号。
+6. 用口语化的技术中文，避免翻译腔：不要连续使用「它是一个……的工具，它能够……」，
+   也不要出现「该项目」「赋能」「一站式解决方案」这类空话。
+7. 改写示例（照这个风格写）：
+   原文：「The most powerful and modular diffusion model GUI, api and backend with a
+   graph/nodes interface.」
+   ✅「用节点图搭 Diffusion 工作流，采样、后处理、插件都能拖拽组装，本地跑起来也快。」
+   ❌「The most powerful and modular diffusion model GUI，一个强大的节点式界面。」
+
+内容要求：
+1. title 要吸引人，必须包含今天的日期（YYYY-MM-DD）。
+2. featured 精选 3 个最有意思的仓库；每个 highlight 100-150 个汉字，至少说清
+   「解决什么问题」「怎么用」「适合谁」其中的两点，让读者知道值不值得点进去。
+3. description 是一句话中文简介，30 字以内，说清它是做什么的；页面上已经把仓库名
+   当小标题展示了，不要再用仓库名开头，也不要和 highlight 重复同一句话。
+4. quick_picks 放剩下的仓库，每个用 15-40 字的中文一句话点出它的独特之处，
+   不要写成「某某项目」这种没有信息量的短语。
+5. description 和 highlight 都不能为空。若原始 description 缺失或信息量太少，
+   就依据仓库名、语言和已知信息写一句克制的说明，不要编造具体功能、数据或荣誉。
+6. 风格轻松有趣，适合公众号阅读；featured 的 highlight 可带 1 个 emoji，
+   不要整篇堆 emoji。
+7. summary 用一句话收尾，可以带一句轻量互动（例如问问读者最想试哪个项目）。
+
+事实与来源约束：
+1. 只能使用用户提供的列表中的仓库，不得引入列表之外的任何项目。
+2. name 必须是列表中的原始仓库名，url 必须是原始 URL，不得改动、不得编造。
+3. 只允许输出上述字段，不要新增字段。
+4. 可以引用列表里的 stars / today_stars 数据，但不得改写、估算或四舍五入数字。
+
+输出前自检（只在心里检查，不要把检查过程写进输出）：
+- description / highlight 里还有没有整句英文？有就改写成中文。
+- 有没有仓库名写错、URL 编造、字段缺失或多余字段？
+- 输出的 JSON 是否可以被直接解析？"""
 
 
 def load_dotenv(path: Path) -> None:
@@ -170,6 +205,9 @@ def build_messages(trending: list) -> list:
         f"今天的日期是 {today}。\n\n"
         f"今日 GitHub Trending 仓库列表（共 {len(compact)} 个）：\n\n"
         f"{json.dumps(compact, ensure_ascii=False, indent=2)}\n\n"
+        "注意：上面每个仓库的 description 都是英文原文，只是给你理解用的素材。\n"
+        "写入文章时必须译写成简体中文，不要照抄、不要保留整句英文；\n"
+        "仓库名、产品名、编程语言和技术缩写按原样保留即可。\n\n"
         "请严格按系统提示的 JSON 格式输出。"
     )
     return [
@@ -228,6 +266,45 @@ def validate(article: dict, trending: list) -> None:
     unknown = [n for n in used if n not in known]
     if unknown:
         raise ValueError(f"以下仓库不在 trending.json 中，疑似模型编造：{unknown}")
+
+
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def looks_english(text: str) -> bool:
+    """判断一段文案是否「以英文为主」。
+
+    trending.json 里的 description 是英文原文，模型最容易犯的错就是原样搬进文章，
+    表现为「The open source coding agent.」这种整句英文。这里只用来提示，不阻断流程：
+    语言风格问题不值得让当天的文章开天窗。
+    """
+    text = (text or "").strip()
+    if len(text) < 4:
+        return False
+    cjk = len(CJK_RE.findall(text))
+    latin = len(LATIN_RE.findall(text))
+    return cjk == 0 or latin > cjk * 2
+
+
+def warn_english_fields(article: dict) -> None:
+    """把偏英文的字段打成 Actions 警告，方便事后回看当天是不是又照抄了英文原文"""
+    fields = [
+        ("title", article.get("title")),
+        ("intro", article.get("intro")),
+        ("summary", article.get("summary")),
+    ]
+    for key in ("featured", "quick_picks"):
+        for i, item in enumerate(article.get(key) or []):
+            fields.append((f"{key}[{i}].description", item.get("description")))
+            fields.append((f"{key}[{i}].highlight", item.get("highlight")))
+
+    bad = [(name, (text or "").strip()) for name, text in fields if looks_english(text)]
+    if not bad:
+        return
+    print(f"::warning::以下 {len(bad)} 处文案疑似以英文为主，未达到「介绍语句中文为主」的要求：")
+    for name, text in bad:
+        print(f"::warning::  {name}: {text[:60]}")
 
 
 def post_once(provider: dict, payload: dict) -> requests.Response:
@@ -520,6 +597,8 @@ def main() -> int:
     except Exception as e:
         print(f"::error::产物校验失败：{e}")
         return 1
+
+    warn_english_fields(article)
 
     ARTICLE_JSON.write_text(json.dumps(article, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     used = len(article.get("featured") or []) + len(article.get("quick_picks") or [])

@@ -53,6 +53,23 @@ HTTP 403  {"type":"error","error":{"type":"FreeTierError",
 > ⚠️ 顺带记一个坑：**GitHub Models 已于 2026-07-30 整体下线**，推理 API 不再可用。
 > 网上不少 2026 年的「免费 LLM API 盘点」仍在推荐它，是过期的。
 
+### 文案语言：介绍语句必须中文为主
+
+`trending.json` 里的 `description` 是 GitHub 上的英文原文，模型很容易直接照抄，
+导致文章出现「The open source coding agent.」这种整句英文的「简介」。
+
+所以 prompt 里把语言要求提到了**最高优先级**，并定死边界：
+
+- `title` / `intro` / `description` / `highlight` / `summary` 一律简体中文；
+- 英文原文只作理解素材，禁止照抄、禁止「英文句子 + 中文句子」拼接；
+- 只有仓库名、产品名（opencode、ComfyUI、Claude Code）、编程语言、技术缩写
+  （API / SDK / CLI / LLM / RAG / CI/CD）保留英文，不硬译；
+- `description` 30 字以内、`highlight` 100-150 汉字、`quick_picks` 15-40 字，
+  并且不能为空（原文缺描述就写克制的说明，不许编造功能）。
+
+`generate_article.py` 还会在产物偏英文时打 `::warning::`（不阻断发布），
+回看 Actions 日志就能知道当天是不是又退化成照抄英文了。
+
 ## 流程
 
 ```
